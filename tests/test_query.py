@@ -4,6 +4,9 @@ import pytest
 # GraphQL
 from graphene_sqlalchemy.utils import EnumValue
 
+# Database
+from sqlalchemy.sql import text
+
 # Project
 from graphene_sqlalchemy_filter import FilterSet
 from tests import gqls_version, models
@@ -14,13 +17,16 @@ def test_sort(info):
     filters = None
     sort = 'username desc'
     query = Query.field.get_query(
-        models.User, info, sort=EnumValue('username', sort), filters=filters
+        models.User,
+        info,
+        sort=EnumValue('username', text(sort)),
+        filters=filters,
     )
 
     where_clause = query.whereclause
     assert where_clause is None
 
-    assert str(query._order_by[0]) == sort
+    assert str(query._order_by_clauses[0]) == sort
 
 
 def test_empty_filters_query(info_and_user_query):
@@ -54,7 +60,6 @@ def test_enum(info_and_user_query):
     where_clause = query.whereclause
     ok = '"user".status = :status_1'
     assert str(where_clause) == ok
-
     assert where_clause.right.effective_value == models.StatusEnum.online
 
 
@@ -187,10 +192,43 @@ def test_complex_filters(info_and_user_query):
         ' OR "user".is_active != true'
         ' AND is_moderator.id IS NOT NULL'
         ' OR of_group.name = :name_1'
-        ' AND "user".username NOT IN (:username_3))'
+        ' AND ("user".username NOT IN ([POSTCOMPILE_username_3])))'
     )
     where_clause = str(query.whereclause)
     assert where_clause == ok
 
     str_query = str(query)
     assert str_query.lower().count('join') == 4, str_query
+
+
+def test_complex_relationship_filters(info_and_user_query):
+    info, user_query = info_and_user_query
+
+    filters = {
+        'not': {'is_active': True},
+        'or': [
+            {'is_admin': False},
+            {
+                'assignments': {
+                    'or': [{'task': {'name': 'Write code'}}, {'active': True}]
+                }
+            },
+        ],
+    }
+    query = UserFilter.filter(info, user_query, filters)
+
+    ok = (
+        '"user".is_active != true AND '
+        '("user".username != :username_1 OR (EXISTS (SELECT 1'
+        ' FROM "user", task_assignments'
+        ' WHERE "user".user_id = task_assignments.user_id AND ((EXISTS'
+        ' (SELECT 1 FROM task_assignments'
+        ' WHERE "user".user_id = task_assignments.user_id AND (EXISTS'
+        ' (SELECT 1 FROM task'
+        ' WHERE task.id = task_assignments.task_id AND task.name = :name_1))))'
+        ' OR (EXISTS (SELECT 1 FROM task_assignments WHERE '
+        '"user".user_id = task_assignments.user_id AND '
+        'task_assignments.active = true))))))'
+    )
+    where_clause = str(query.whereclause).replace('\n', '')
+    assert where_clause == ok
